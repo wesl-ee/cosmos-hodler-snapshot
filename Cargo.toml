@@ -1,0 +1,10 @@
+[package]
+name = "cosmos-hodler-snapshot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic = { version = "0.8", features = ["channel", "tls", "tls-roots"], default-features = false }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+cosmos-sdk-proto = "0.16"
+clap = { version = "4.0", features = ["cargo"] }

@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         pagination = match val_response.pagination {
             Some(p) => {
-                if p.next_key.len() == 0 {
+                if p.next_key.is_empty() {
                     break;
                 }
 
@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             pagination = match del_response.pagination {
                 Some(p) => {
-                    if p.next_key.len() == 0 {
+                    if p.next_key.is_empty() {
                         break;
                     }
 

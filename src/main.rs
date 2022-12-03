@@ -1,3 +1,4 @@
+use clap::ArgMatches;
 use cosmos_sdk_proto::cosmos::base::query::v1beta1::PageRequest;
 use cosmos_sdk_proto::cosmos::staking::v1beta1::query_client::QueryClient;
 use cosmos_sdk_proto::cosmos::staking::v1beta1::{
@@ -6,27 +7,22 @@ use cosmos_sdk_proto::cosmos::staking::v1beta1::{
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
-use tonic::transport::Endpoint;
+use tonic::transport::{Channel, Endpoint};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cmd = clap::Command::new("cosmos-hodler-snapshot")
+    let matches = clap::Command::new("cosmos-hodler-snapshot")
         .version("0.1.0")
         .about("Snapshot token stakers on Cosmos SDK chains")
+        .subcommand_required(true)
         .author("wesl-ee")
-        .subcommand(
-            clap::command!("native-stakers").arg(
-                clap::arg!(--"grpc" <URL>)
-                    .required(true)
-                    .value_parser(clap::value_parser!(Endpoint)),
-            ),
-        );
-
-    let matches = cmd.get_matches();
-    let matches = match matches.subcommand() {
-        Some(("native-stakers", matches)) => matches,
-        _ => unreachable!(),
-    };
+        .arg(
+            clap::arg!(--"grpc" <URI>)
+                .required(true)
+                .value_parser(clap::value_parser!(Endpoint)),
+        )
+        .subcommand(clap::command!("native-stakers"))
+        .get_matches();
 
     let endpoint = matches.get_one::<Endpoint>("grpc").unwrap();
     let channel = match tokio::time::timeout(
@@ -39,9 +35,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => panic!("gRPC timed out"),
     }?;
 
-    let mut validators: Vec<String> = vec![];
-    let mut pagination = None;
+    match matches.subcommand() {
+        Some(("native-stakers", matches)) => {
+            native_stakers(matches, channel).await?
+        }
+        _ => unreachable!(),
+    };
 
+    Ok(())
+}
+
+async fn native_stakers(
+    _matches: &ArgMatches,
+    channel: Channel,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut csv = OpenOptions::new()
         .write(true)
         .create(true)
@@ -49,8 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open("juno_stakers.csv")
         .unwrap();
 
-    let mut staking_query_client = QueryClient::new(channel);
+    let mut validators: Vec<String> = vec![];
+    let mut pagination = None;
 
+    let mut staking_query_client = QueryClient::<Channel>::new(channel);
     loop {
         let val_response = staking_query_client
             .validators(QueryValidatorsRequest {

@@ -67,21 +67,11 @@ async fn native_stakers(
         .open(output)
         .unwrap();
 
-    let mut validators: Vec<String> = vec![];
     let mut staking_query_client = QueryClient::<Channel>::new(channel);
 
-    for status in [
-        "BOND_STATUS_BONDED",
-        "BOND_STATUS_UNBONDING",
-        "BOND_STATUS_UNBONDING",
-    ] {
-        append_validators_with_status(
-            &mut staking_query_client,
-            &mut validators,
-            status.to_string(),
-        )
-        .await?;
-    }
+    let validators =
+        validators_with_status(&mut staking_query_client, "".to_string())
+            .await?;
 
     let mut delegators_map: HashMap<String, u128> = HashMap::new();
     for (i, v) in validators.iter().enumerate() {
@@ -136,14 +126,14 @@ async fn native_stakers(
     Ok(())
 }
 
-async fn append_validators_with_status(
+async fn validators_with_status(
     client: &mut QueryClient<Channel>,
-    validators: &mut Vec<String>,
     status: String,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut validators = vec![];
     let mut pagination = None;
     loop {
-        let val_response = client
+        let response = client
             .validators(QueryValidatorsRequest {
                 pagination,
                 status: status.clone(),
@@ -151,26 +141,19 @@ async fn append_validators_with_status(
             .await?
             .into_inner();
 
-        construct_validators_list(validators, &val_response);
-        pagination = match next_page(&val_response) {
+        validators.append(
+            &mut response
+                .validators
+                .iter()
+                .filter(|v| !v.jailed)
+                .map(|v| v.operator_address.clone())
+                .collect::<Vec<String>>(),
+        );
+        pagination = match next_page(&response) {
             Some(p) => Some(p),
-            None => return Ok(()),
+            None => return Ok(validators),
         };
     }
-}
-
-fn construct_validators_list(
-    validators: &mut Vec<String>,
-    response: &QueryValidatorsResponse,
-) {
-    validators.append(
-        &mut response
-            .validators
-            .iter()
-            .filter(|v| !v.jailed)
-            .map(|v| v.operator_address.clone())
-            .collect::<Vec<String>>(),
-    );
 }
 
 fn next_page<T: PaginatedResponse>(resp: &T) -> Option<PageRequest> {

@@ -45,12 +45,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(("native-stakers", matches)) => {
             native_stakers(matches, channel).await?
         }
+        /* Unreachable because a command is required */
         _ => unreachable!(),
     };
 
     Ok(())
 }
 
+/**
+ * Snapshot stakers of the native token (x/staking)
+ */
 async fn native_stakers(
     matches: &ArgMatches,
     channel: Channel,
@@ -60,6 +64,8 @@ async fn native_stakers(
         .unwrap_or(&std::path::PathBuf::from("juno_stakers.csv"))
         .clone();
 
+    /* Open the csv here so we don't do all the processing just to find out it
+     * can't be opened created or written to */
     let mut csv = OpenOptions::new()
         .write(true)
         .create(true)
@@ -83,6 +89,7 @@ async fn native_stakers(
 
         let mut pagination = None;
         loop {
+            /* gRPC query */
             let del_response = staking_query_client
                 .validator_delegations(QueryValidatorDelegationsRequest {
                     pagination,
@@ -91,7 +98,10 @@ async fn native_stakers(
                 .await?
                 .into_inner();
 
+            /* Set up the next queriable page, if any */
             pagination = next_page(&del_response);
+
+            /* Break down the response into individual delegators and index */
             for resp in del_response.delegation_responses {
                 if let Some(delegation) = resp.delegation {
                     let amount =
@@ -108,7 +118,7 @@ async fn native_stakers(
                 }
             }
 
-            /* Last page */
+            /* This was the final page */
             if pagination.is_none() {
                 break;
             }
@@ -119,6 +129,7 @@ async fn native_stakers(
 
     for (d, amt) in delegators_map {
         if amt > 0 {
+            /* The thinking man's csv library */
             writeln!(csv, "{},{}", d, amt).unwrap();
         }
     }
@@ -126,6 +137,14 @@ async fn native_stakers(
     Ok(())
 }
 
+/**
+ * Query the gRPC for all non-jailed validators of given status
+ * + BOND_STATUS_BONDED
+ * + BOND_STATUS_UNBONDING
+ * + BOND_STATUS_UNBONDED
+ *
+ * Or "" for all validators
+ */
 async fn validators_with_status(
     client: &mut QueryClient<Channel>,
     status: String,
@@ -156,6 +175,10 @@ async fn validators_with_status(
     }
 }
 
+/**
+ * Construct the next PageRequest to send given the previous response
+ * to a paginated query
+ */
 fn next_page<T: PaginatedResponse>(resp: &T) -> Option<PageRequest> {
     match resp.next_key() {
         Some(key) => {
@@ -163,8 +186,11 @@ fn next_page<T: PaginatedResponse>(resp: &T) -> Option<PageRequest> {
                 None
             } else {
                 Some(PageRequest {
+                    /* Last page's returned key */
                     key: key.to_vec(),
-                    limit: 200,
+                    /* 100 per page */
+                    limit: 100,
+                    /* Don't specify offset - mutually exclusive w/ "key" */
                     offset: 0,
                     reverse: false,
                     count_total: false,
@@ -175,6 +201,10 @@ fn next_page<T: PaginatedResponse>(resp: &T) -> Option<PageRequest> {
     }
 }
 
+/**
+ * A response from the SDK that returns a `next_key` for fetching the next
+ * page of data
+ */
 pub trait PaginatedResponse {
     fn next_key(&self) -> Option<Vec<u8>>;
 }

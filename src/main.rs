@@ -2,7 +2,8 @@ use clap::ArgMatches;
 use cosmos_sdk_proto::cosmos::base::query::v1beta1::PageRequest;
 use cosmos_sdk_proto::cosmos::staking::v1beta1::query_client::QueryClient;
 use cosmos_sdk_proto::cosmos::staking::v1beta1::{
-    QueryValidatorDelegationsRequest, QueryValidatorsRequest,
+    QueryValidatorDelegationsRequest, QueryValidatorDelegationsResponse,
+    QueryValidatorsRequest, QueryValidatorsResponse,
 };
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -21,7 +22,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .required(true)
                 .value_parser(clap::value_parser!(Endpoint)),
         )
-        .subcommand(clap::command!("native-stakers"))
+        .subcommand(
+            clap::command!("native-stakers").arg(
+                clap::arg!(--"output" <PATH>)
+                    .value_parser(clap::value_parser!(std::path::PathBuf)),
+            ),
+        )
         .get_matches();
 
     let endpoint = matches.get_one::<Endpoint>("grpc").unwrap();
@@ -46,64 +52,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn native_stakers(
-    _matches: &ArgMatches,
+    matches: &ArgMatches,
     channel: Channel,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let output = matches
+        .get_one::<std::path::PathBuf>("output")
+        .unwrap_or(&std::path::PathBuf::from("juno_stakers.csv"))
+        .clone();
+
     let mut csv = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open("juno_stakers.csv")
+        .open(output)
         .unwrap();
 
     let mut validators: Vec<String> = vec![];
-    let mut pagination = None;
-
     let mut staking_query_client = QueryClient::<Channel>::new(channel);
-    loop {
-        let val_response = staking_query_client
-            .validators(QueryValidatorsRequest {
-                pagination,
-                status: "BOND_STATUS_BONDED".to_string(),
-            })
-            .await?
-            .into_inner();
 
-        validators.append(
-            &mut val_response
-                .validators
-                .iter()
-                .map(|v| v.operator_address.clone())
-                .collect::<Vec<String>>(),
-        );
-
-        pagination = match val_response.pagination {
-            Some(p) => {
-                if p.next_key.is_empty() {
-                    break;
-                }
-
-                Some(PageRequest {
-                    key: p.next_key,
-                    offset: 0,
-                    limit: 100,
-                    count_total: false,
-                    reverse: false,
-                })
-            }
-            None => break,
-        };
+    for status in [
+        "BOND_STATUS_BONDED",
+        "BOND_STATUS_UNBONDING",
+        "BOND_STATUS_UNBONDING",
+    ] {
+        append_validators_with_status(
+            &mut staking_query_client,
+            &mut validators,
+            status.to_string(),
+        )
+        .await?;
     }
 
     let mut delegators_map: HashMap<String, u128> = HashMap::new();
     for (i, v) in validators.iter().enumerate() {
         println!(
             "[{:.1}%] Processing delegations to validator {}",
-            (i * 100) as f64 / validators.len() as f64,
+            (i * 100) as f64 / (validators.len() - 1) as f64,
             v
         );
 
-        pagination = None;
+        let mut pagination = None;
         loop {
             let del_response = staking_query_client
                 .validator_delegations(QueryValidatorDelegationsRequest {
@@ -113,6 +101,7 @@ async fn native_stakers(
                 .await?
                 .into_inner();
 
+            pagination = next_page(&del_response);
             for resp in del_response.delegation_responses {
                 if let Some(delegation) = resp.delegation {
                     let amount =
@@ -129,22 +118,10 @@ async fn native_stakers(
                 }
             }
 
-            pagination = match del_response.pagination {
-                Some(p) => {
-                    if p.next_key.is_empty() {
-                        break;
-                    }
-
-                    Some(PageRequest {
-                        key: p.next_key,
-                        offset: 0,
-                        limit: 100,
-                        count_total: false,
-                        reverse: false,
-                    })
-                }
-                None => break,
-            };
+            /* Last page */
+            if pagination.is_none() {
+                break;
+            }
         }
 
         println!("{} delegators indexed", delegators_map.keys().len());
@@ -157,4 +134,80 @@ async fn native_stakers(
     }
 
     Ok(())
+}
+
+async fn append_validators_with_status(
+    client: &mut QueryClient<Channel>,
+    validators: &mut Vec<String>,
+    status: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut pagination = None;
+    loop {
+        let val_response = client
+            .validators(QueryValidatorsRequest {
+                pagination,
+                status: status.clone(),
+            })
+            .await?
+            .into_inner();
+
+        construct_validators_list(validators, &val_response);
+        pagination = match next_page(&val_response) {
+            Some(p) => Some(p),
+            None => return Ok(()),
+        };
+    }
+}
+
+fn construct_validators_list(
+    validators: &mut Vec<String>,
+    response: &QueryValidatorsResponse,
+) {
+    validators.append(
+        &mut response
+            .validators
+            .iter()
+            .filter(|v| !v.jailed)
+            .map(|v| v.operator_address.clone())
+            .collect::<Vec<String>>(),
+    );
+}
+
+fn next_page<T: PaginatedResponse>(resp: &T) -> Option<PageRequest> {
+    match resp.next_key() {
+        Some(key) => {
+            if key.is_empty() {
+                None
+            } else {
+                Some(PageRequest {
+                    key: key.to_vec(),
+                    limit: 200,
+                    offset: 0,
+                    reverse: false,
+                    count_total: false,
+                })
+            }
+        }
+        None => None,
+    }
+}
+
+pub trait PaginatedResponse {
+    fn next_key(&self) -> Option<Vec<u8>>;
+}
+
+impl PaginatedResponse for QueryValidatorDelegationsResponse {
+    fn next_key(&self) -> Option<Vec<u8>> {
+        self.pagination
+            .clone() // NG
+            .map(|p| p.next_key)
+    }
+}
+
+impl PaginatedResponse for QueryValidatorsResponse {
+    fn next_key(&self) -> Option<Vec<u8>> {
+        self.pagination
+            .clone() // NG
+            .map(|p| p.next_key)
+    }
 }
